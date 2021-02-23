@@ -20,7 +20,6 @@ require (
 	github.com/imdario/mergo v0.3.11
 	github.com/klauspost/compress v1.11.7
 	github.com/klauspost/pgzip v1.2.5
-	github.com/konsorten/go-windows-terminal-sequences v1.0.3 // indirect
 	github.com/manifoldco/promptui v0.8.0
 	github.com/morikuni/aec v1.0.0 // indirect
 	github.com/mtrmac/gpgme v0.1.2
