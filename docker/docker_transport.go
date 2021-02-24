@@ -10,6 +10,7 @@ import (
 	"github.com/containers/image/v5/transports"
 	"github.com/containers/image/v5/types"
 	"github.com/pkg/errors"
+	"go.opencensus.io/trace"
 )
 
 func init() {
@@ -152,7 +153,19 @@ func (ref dockerReference) NewImageDestination(ctx context.Context, sys *types.S
 
 // DeleteImage deletes the named image from the registry, if supported.
 func (ref dockerReference) DeleteImage(ctx context.Context, sys *types.SystemContext) error {
-	return deleteImage(ctx, sys, ref)
+	var span *trace.Span
+	ctx, span = trace.StartSpan(ctx, "deleteImage")
+	defer span.End()
+
+	err := deleteImage(ctx, sys, ref)
+	if err != nil {
+		span.SetStatus(trace.Status{
+			Code:    trace.StatusCodeUnknown,
+			Message: err.Error(),
+		})
+	}
+
+	return err
 }
 
 // tagOrDigest returns a tag or digest from the reference.

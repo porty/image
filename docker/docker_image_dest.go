@@ -27,6 +27,7 @@ import (
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"go.opencensus.io/trace"
 )
 
 type dockerImageDestination struct {
@@ -131,6 +132,22 @@ func (d *dockerImageDestination) HasThreadSafePutBlob() bool {
 // to any other readers for download using the supplied digest.
 // If stream.Read() at any time, ESPECIALLY at end of input, returns an error, PutBlob MUST 1) fail, and 2) delete any data stored so far.
 func (d *dockerImageDestination) PutBlob(ctx context.Context, stream io.Reader, inputInfo types.BlobInfo, cache types.BlobInfoCache, isConfig bool) (types.BlobInfo, error) {
+	var span *trace.Span
+	ctx, span = trace.StartSpan(ctx, "putBlob")
+	defer span.End()
+
+	blobInfo, err := d.putBlob(ctx, stream, inputInfo, cache, isConfig)
+	if err != nil {
+		span.SetStatus(trace.Status{
+			Code:    trace.StatusCodeUnknown,
+			Message: err.Error(),
+		})
+	}
+
+	return blobInfo, err
+}
+
+func (d *dockerImageDestination) putBlob(ctx context.Context, stream io.Reader, inputInfo types.BlobInfo, cache types.BlobInfoCache, isConfig bool) (types.BlobInfo, error) {
 	if inputInfo.Digest.String() != "" {
 		// This should not really be necessary, at least the copy code calls TryReusingBlob automatically.
 		// Still, we need to check, if only because the "initiate upload" endpoint does not have a documented "blob already exists" return value.
@@ -291,6 +308,22 @@ func (d *dockerImageDestination) mountBlob(ctx context.Context, srcRepo referenc
 // If the transport can not reuse the requested blob, TryReusingBlob returns (false, {}, nil); it returns a non-nil error only on an unexpected failure.
 // May use and/or update cache.
 func (d *dockerImageDestination) TryReusingBlob(ctx context.Context, info types.BlobInfo, cache types.BlobInfoCache, canSubstitute bool) (bool, types.BlobInfo, error) {
+	var span *trace.Span
+	ctx, span = trace.StartSpan(ctx, "tryReusingBlob")
+	defer span.End()
+
+	canReuse, info, err := d.tryReusingBlob(ctx, info, cache, canSubstitute)
+	if err != nil {
+		span.SetStatus(trace.Status{
+			Code:    trace.StatusCodeUnknown,
+			Message: err.Error(),
+		})
+	}
+
+	return canReuse, info, err
+}
+
+func (d *dockerImageDestination) tryReusingBlob(ctx context.Context, info types.BlobInfo, cache types.BlobInfoCache, canSubstitute bool) (bool, types.BlobInfo, error) {
 	if info.Digest == "" {
 		return false, types.BlobInfo{}, errors.Errorf(`"Can not check for a blob with unknown digest`)
 	}
@@ -383,6 +416,22 @@ func (d *dockerImageDestination) TryReusingBlob(ctx context.Context, info types.
 // If the destination is in principle available, refuses this manifest type (e.g. it does not recognize the schema),
 // but may accept a different manifest type, the returned error must be an ManifestTypeRejectedError.
 func (d *dockerImageDestination) PutManifest(ctx context.Context, m []byte, instanceDigest *digest.Digest) error {
+	var span *trace.Span
+	ctx, span = trace.StartSpan(ctx, "putManifest")
+	defer span.End()
+
+	err := d.putManifest(ctx, m, instanceDigest)
+	if err != nil {
+		span.SetStatus(trace.Status{
+			Code:    trace.StatusCodeUnknown,
+			Message: err.Error(),
+		})
+	}
+
+	return err
+}
+
+func (d *dockerImageDestination) putManifest(ctx context.Context, m []byte, instanceDigest *digest.Digest) error {
 	refTail := ""
 	if instanceDigest != nil {
 		// If the instanceDigest is provided, then use it as the refTail, because the reference,
@@ -480,6 +529,21 @@ func isManifestInvalidError(err error) bool {
 // If instanceDigest is not nil, it contains a digest of the specific manifest instance to upload the signatures for (when
 // the primary manifest is a manifest list); this should always be nil if the primary manifest is not a manifest list.
 func (d *dockerImageDestination) PutSignatures(ctx context.Context, signatures [][]byte, instanceDigest *digest.Digest) error {
+	var span *trace.Span
+	ctx, span = trace.StartSpan(ctx, "putBlob")
+	defer span.End()
+
+	err := d.putSignatures(ctx, signatures, instanceDigest)
+	if err != nil {
+		span.SetStatus(trace.Status{
+			Code:    trace.StatusCodeUnknown,
+			Message: err.Error(),
+		})
+	}
+	return err
+}
+
+func (d *dockerImageDestination) putSignatures(ctx context.Context, signatures [][]byte, instanceDigest *digest.Digest) error {
 	// Do not fail if we don’t really need to support signatures.
 	if len(signatures) == 0 {
 		return nil

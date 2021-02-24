@@ -20,6 +20,7 @@ import (
 	digest "github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"go.opencensus.io/trace"
 )
 
 type dockerImageSource struct {
@@ -175,6 +176,22 @@ func simplifyContentType(contentType string) string {
 // If instanceDigest is not nil, it contains a digest of the specific manifest instance to retrieve (when the primary manifest is a manifest list);
 // this never happens if the primary manifest is not a manifest list (e.g. if the source never returns manifest lists).
 func (s *dockerImageSource) GetManifest(ctx context.Context, instanceDigest *digest.Digest) ([]byte, string, error) {
+	var span *trace.Span
+	ctx, span = trace.StartSpan(ctx, "getManifest")
+	defer span.End()
+
+	b, mime, err := s.getManifest(ctx, instanceDigest)
+	if err != nil {
+		span.SetStatus(trace.Status{
+			Code:    trace.StatusCodeUnknown,
+			Message: err.Error(),
+		})
+	}
+
+	return b, mime, err
+}
+
+func (s *dockerImageSource) getManifest(ctx context.Context, instanceDigest *digest.Digest) ([]byte, string, error) {
 	if instanceDigest != nil {
 		return s.fetchManifest(ctx, instanceDigest.String())
 	}
@@ -279,6 +296,22 @@ func (s *dockerImageSource) HasThreadSafeGetBlob() bool {
 // The Digest field in BlobInfo is guaranteed to be provided, Size may be -1 and MediaType may be optionally provided.
 // May update BlobInfoCache, preferably after it knows for certain that a blob truly exists at a specific location.
 func (s *dockerImageSource) GetBlob(ctx context.Context, info types.BlobInfo, cache types.BlobInfoCache) (io.ReadCloser, int64, error) {
+	var span *trace.Span
+	ctx, span = trace.StartSpan(ctx, "getBlob")
+	defer span.End()
+
+	r, size, err := s.getBlob(ctx, info, cache)
+	if err != nil {
+		span.SetStatus(trace.Status{
+			Code:    trace.StatusCodeUnknown,
+			Message: err.Error(),
+		})
+	}
+
+	return r, size, err
+}
+
+func (s *dockerImageSource) getBlob(ctx context.Context, info types.BlobInfo, cache types.BlobInfoCache) (io.ReadCloser, int64, error) {
 	if len(info.URLs) != 0 {
 		return s.getExternalBlob(ctx, info.URLs)
 	}
@@ -301,6 +334,22 @@ func (s *dockerImageSource) GetBlob(ctx context.Context, info types.BlobInfo, ca
 // (when the primary manifest is a manifest list); this never happens if the primary manifest is not a manifest list
 // (e.g. if the source never returns manifest lists).
 func (s *dockerImageSource) GetSignatures(ctx context.Context, instanceDigest *digest.Digest) ([][]byte, error) {
+	var span *trace.Span
+	ctx, span = trace.StartSpan(ctx, "getSignatures")
+	defer span.End()
+
+	sigs, err := s.getSignatures(ctx, instanceDigest)
+	if err != nil {
+		span.SetStatus(trace.Status{
+			Code:    trace.StatusCodeUnknown,
+			Message: err.Error(),
+		})
+	}
+
+	return sigs, err
+}
+
+func (s *dockerImageSource) getSignatures(ctx context.Context, instanceDigest *digest.Digest) ([][]byte, error) {
 	if err := s.c.detectProperties(ctx); err != nil {
 		return nil, err
 	}
