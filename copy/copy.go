@@ -30,6 +30,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/vbauerster/mpb/v6"
 	"github.com/vbauerster/mpb/v6/decor"
+	"go.opencensus.io/trace"
 	"golang.org/x/crypto/ssh/terminal"
 	"golang.org/x/sync/semaphore"
 )
@@ -713,73 +714,88 @@ func (c *copier) copyOneImage(ctx context.Context, policyContext *signature.Poli
 		return nil, "", "", err
 	}
 
-	// With docker/distribution registries we do not know whether the registry accepts schema2 or schema1 only;
-	// and at least with the OpenShift registry "acceptschema2" option, there is no way to detect the support
-	// without actually trying to upload something and getting a types.ManifestTypeRejectedError.
-	// So, try the preferred manifest MIME type with possibly-updated blob digests, media types, and sizes if
-	// we're altering how they're compressed.  If the process succeeds, fine…
-	manifestBytes, retManifestDigest, err := ic.copyUpdatedConfigAndManifest(ctx, targetInstance)
-	retManifestType = preferredManifestMIMEType
-	if err != nil {
-		logrus.Debugf("Writing manifest using preferred type %s failed: %v", preferredManifestMIMEType, err)
-		// … if it fails, and the failure is either because the manifest is rejected by the registry, or
-		// because we failed to create a manifest of the specified type because the specific manifest type
-		// doesn't support the type of compression we're trying to use (e.g. docker v2s2 and zstd), we may
-		// have other options available that could still succeed.
-		_, isManifestRejected := errors.Cause(err).(types.ManifestTypeRejectedError)
-		_, isCompressionIncompatible := errors.Cause(err).(manifest.ManifestLayerCompressionIncompatibilityError)
-		if (!isManifestRejected && !isCompressionIncompatible) || len(otherManifestMIMETypeCandidates) == 0 {
-			// We don’t have other options.
-			// In principle the code below would handle this as well, but the resulting  error message is fairly ugly.
-			// Don’t bother the user with MIME types if we have no choice.
-			return nil, "", "", err
-		}
-		// If the original MIME type is acceptable, determineManifestConversion always uses it as preferredManifestMIMEType.
-		// So if we are here, we will definitely be trying to convert the manifest.
-		// With !ic.canModifyManifest, that would just be a string of repeated failures for the same reason,
-		// so let’s bail out early and with a better error message.
-		if !ic.canModifyManifest {
-			return nil, "", "", errors.Wrap(err, "Writing manifest failed (and converting it is not possible, image is signed or the destination specifies a digest)")
-		}
+	finalizeCopiedImage := func(ctx context.Context) ([]byte, error) {
+		// With docker/distribution registries we do not know whether the registry accepts schema2 or schema1 only;
+		// and at least with the OpenShift registry "acceptschema2" option, there is no way to detect the support
+		// without actually trying to upload something and getting a types.ManifestTypeRejectedError.
+		// So, try the preferred manifest MIME type with possibly-updated blob digests, media types, and sizes if
+		// we're altering how they're compressed.  If the process succeeds, fine…
 
-		// errs is a list of errors when trying various manifest types. Also serves as an "upload succeeded" flag when set to nil.
-		errs := []string{fmt.Sprintf("%s(%v)", preferredManifestMIMEType, err)}
-		for _, manifestMIMEType := range otherManifestMIMETypeCandidates {
-			logrus.Debugf("Trying to use manifest type %s…", manifestMIMEType)
-			ic.manifestUpdates.ManifestMIMEType = manifestMIMEType
-			attemptedManifest, attemptedManifestDigest, err := ic.copyUpdatedConfigAndManifest(ctx, targetInstance)
-			if err != nil {
-				logrus.Debugf("Upload of manifest type %s failed: %v", manifestMIMEType, err)
-				errs = append(errs, fmt.Sprintf("%s(%v)", manifestMIMEType, err))
-				continue
+		manifestBytes, retManifestDigest, err := ic.copyUpdatedConfigAndManifest(ctx, targetInstance)
+		retManifestType = preferredManifestMIMEType
+		if err != nil {
+			logrus.Debugf("Writing manifest using preferred type %s failed: %v", preferredManifestMIMEType, err)
+			// … if it fails, and the failure is either because the manifest is rejected by the registry, or
+			// because we failed to create a manifest of the specified type because the specific manifest type
+			// doesn't support the type of compression we're trying to use (e.g. docker v2s2 and zstd), we may
+			// have other options available that could still succeed.
+			_, isManifestRejected := errors.Cause(err).(types.ManifestTypeRejectedError)
+			_, isCompressionIncompatible := errors.Cause(err).(manifest.ManifestLayerCompressionIncompatibilityError)
+			if (!isManifestRejected && !isCompressionIncompatible) || len(otherManifestMIMETypeCandidates) == 0 {
+				// We don’t have other options.
+				// In principle the code below would handle this as well, but the resulting  error message is fairly ugly.
+				// Don’t bother the user with MIME types if we have no choice.
+				return nil, err
+			}
+			// If the original MIME type is acceptable, determineManifestConversion always uses it as preferredManifestMIMEType.
+			// So if we are here, we will definitely be trying to convert the manifest.
+			// With !ic.canModifyManifest, that would just be a string of repeated failures for the same reason,
+			// so let’s bail out early and with a better error message.
+			if !ic.canModifyManifest {
+				return nil, errors.Wrap(err, "Writing manifest failed (and converting it is not possible, image is signed or the destination specifies a digest)")
 			}
 
-			// We have successfully uploaded a manifest.
-			manifestBytes = attemptedManifest
-			retManifestDigest = attemptedManifestDigest
-			retManifestType = manifestMIMEType
-			errs = nil // Mark this as a success so that we don't abort below.
-			break
+			// errs is a list of errors when trying various manifest types. Also serves as an "upload succeeded" flag when set to nil.
+			errs := []string{fmt.Sprintf("%s(%v)", preferredManifestMIMEType, err)}
+			for _, manifestMIMEType := range otherManifestMIMETypeCandidates {
+				logrus.Debugf("Trying to use manifest type %s…", manifestMIMEType)
+				ic.manifestUpdates.ManifestMIMEType = manifestMIMEType
+				attemptedManifest, attemptedManifestDigest, err := ic.copyUpdatedConfigAndManifest(ctx, targetInstance)
+				if err != nil {
+					logrus.Debugf("Upload of manifest type %s failed: %v", manifestMIMEType, err)
+					errs = append(errs, fmt.Sprintf("%s(%v)", manifestMIMEType, err))
+					continue
+				}
+
+				// We have successfully uploaded a manifest.
+				manifestBytes = attemptedManifest
+				retManifestDigest = attemptedManifestDigest
+				retManifestType = manifestMIMEType
+				errs = nil // Mark this as a success so that we don't abort below.
+				break
+			}
+			if errs != nil {
+				return nil, fmt.Errorf("Uploading manifest failed, attempted the following formats: %s", strings.Join(errs, ", "))
+			}
 		}
-		if errs != nil {
-			return nil, "", "", fmt.Errorf("Uploading manifest failed, attempted the following formats: %s", strings.Join(errs, ", "))
+		if targetInstance != nil {
+			targetInstance = &retManifestDigest
 		}
-	}
-	if targetInstance != nil {
-		targetInstance = &retManifestDigest
+
+		if options.SignBy != "" {
+			newSig, err := c.createSignature(manifestBytes, options.SignBy)
+			if err != nil {
+				return nil, err
+			}
+			sigs = append(sigs, newSig)
+		}
+
+		c.Printf("Storing signatures\n")
+		if err := c.dest.PutSignatures(ctx, sigs, targetInstance); err != nil {
+			return nil, errors.Wrap(err, "Error writing signatures")
+		}
+		return manifestBytes, nil
 	}
 
-	if options.SignBy != "" {
-		newSig, err := c.createSignature(manifestBytes, options.SignBy)
-		if err != nil {
-			return nil, "", "", err
-		}
-		sigs = append(sigs, newSig)
-	}
-
-	c.Printf("Storing signatures\n")
-	if err := c.dest.PutSignatures(ctx, sigs, targetInstance); err != nil {
-		return nil, "", "", errors.Wrap(err, "Error writing signatures")
+	var span *trace.Span
+	ctx, span = trace.StartSpan(ctx, "copyUpdatedConfigAndManifest")
+	defer span.End()
+	manifestBytes, err := finalizeCopiedImage(ctx)
+	if err != nil {
+		span.SetStatus(trace.Status{
+			Code:    trace.StatusCodeUnknown,
+			Message: err.Error(),
+		})
 	}
 
 	return manifestBytes, retManifestType, retManifestDigest, nil
@@ -903,6 +919,11 @@ func (ic *imageCopier) copyLayers(ctx context.Context) error {
 	copyLayerHelper := func(index int, srcLayer types.BlobInfo, toEncrypt bool, pool *mpb.Progress) {
 		defer copySemaphore.Release(1)
 		defer copyGroup.Done()
+		var span *trace.Span
+		ctx, span = trace.StartSpan(ctx, "copy layer")
+		defer span.End()
+		span.AddAttributes(trace.StringAttribute("docker.blob", srcLayer.Digest.String()))
+
 		cld := copyLayerData{}
 		if ic.c.dest.AcceptsForeignLayerURLs() && len(srcLayer.URLs) != 0 {
 			// DiffIDs are, currently, needed only when converting from schema1.
