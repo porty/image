@@ -30,6 +30,8 @@ import (
 	digest "github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"go.opencensus.io/plugin/ochttp"
+	"go.opencensus.io/plugin/ochttp/propagation/b3"
 )
 
 const (
@@ -725,7 +727,15 @@ func (c *dockerClient) detectPropertiesHelper(ctx context.Context) error {
 	}
 	tr := tlsclientconfig.NewTransport()
 	tr.TLSClientConfig = c.tlsClientConfig
-	c.client = &http.Client{Transport: tr}
+
+	c.client = &http.Client{Transport: &ochttp.Transport{
+		Base:        tr,
+		Propagation: &b3.HTTPFormat{},
+		FormatSpanName: func(r *http.Request) string {
+			// cut down on the number of unique span names
+			return r.Method + " " + r.Host
+		},
+	}}
 
 	ping := func(scheme string) error {
 		url := fmt.Sprintf(resolvedPingV2URL, scheme, c.registry)
